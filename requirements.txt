@@ -1,0 +1,5 @@
+requests
+simple-salesforce
+supabase
+python-dotenv
+modal

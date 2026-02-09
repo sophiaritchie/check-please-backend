@@ -7,6 +7,7 @@ create table messages (
   direction text not null,
   from_number text not null,
   message_status text not null default 'pending',
+  message_delivery_result text,
   target_id text,
   target_type text,
   text text,
