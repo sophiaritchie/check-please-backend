@@ -9,10 +9,6 @@ const DIALPAD_API_URL = Deno.env.get("DIALPAD_API_URL")!;
 const DIALPAD_API_KEY = Deno.env.get("DIALPAD_API_KEY")!;
 const DIALPAD_FROM_NUMBER = Deno.env.get("DIALPAD_FROM_NUMBER")!;
 
-const SF_USERNAME = Deno.env.get("SALESFORCE_USERNAME");
-const SF_PASSWORD = Deno.env.get("SALESFORCE_PASSWORD");
-const SF_SEC_TOKEN = Deno.env.get("SALESFORCE_SEC_TOKEN");
-
 const MAX_ATTEMPTS = 3;
 
 interface Message {
@@ -20,8 +16,6 @@ interface Message {
   from_number: string;
   to_numbers: string[];
   text: string;
-  sf_id: string | null;
-  sf_type: string | null;
   attempt_count: number;
   message_status: string;
 }
@@ -51,7 +45,7 @@ async function findNextMessage(): Promise<Message | null> {
 
   const { data: stuck } = await supabase
     .from("messages")
-    .select("id, from_number, to_numbers, text, sf_id, sf_type, attempt_count, message_status")
+    .select("id, from_number, to_numbers, text, attempt_count, message_status")
     .eq("message_status", "pending")
     .lt("last_attempted_at", tenMinAgo)
     .lt("attempt_count", MAX_ATTEMPTS)
@@ -67,7 +61,7 @@ async function findNextMessage(): Promise<Message | null> {
   // Priority b) Webhook-reported failures eligible for retry
   const { data: failed } = await supabase
     .from("messages")
-    .select("id, from_number, to_numbers, text, sf_id, sf_type, attempt_count, message_status")
+    .select("id, from_number, to_numbers, text, attempt_count, message_status")
     .in("message_status", ["failed", "undelivered"])
     .lt("attempt_count", MAX_ATTEMPTS)
     .order("priority", { ascending: false })
@@ -82,7 +76,7 @@ async function findNextMessage(): Promise<Message | null> {
   // Priority c) New queued messages
   const { data: queued } = await supabase
     .from("messages")
-    .select("id, from_number, to_numbers, text, sf_id, sf_type, attempt_count, message_status")
+    .select("id, from_number, to_numbers, text, attempt_count, message_status")
     .eq("message_status", "queued")
     .order("priority", { ascending: false })
     .order("queued_at", { ascending: true })
@@ -159,7 +153,7 @@ async function processMessage(message: Message): Promise<Response> {
 
     const responseStatus = res.message_status || "sent";
 
-    // Update messages table
+    // Update messages table (SF update handled by DB trigger)
     await supabase
       .from("messages")
       .update({
@@ -168,11 +162,6 @@ async function processMessage(message: Message): Promise<Response> {
         last_attempted_at: now,
       })
       .eq("id", message.id);
-
-    // If terminal success, update Salesforce
-    if (responseStatus === "sent" || responseStatus === "delivered") {
-      await updateSalesforceFirstTextDate(message.sf_type, message.sf_id);
-    }
 
     return jsonResponse({
       ok: true,
@@ -231,85 +220,6 @@ async function handleFailure(message: Message, attemptNumber: number, errorDetai
     attempt: attemptNumber,
     will_retry: attemptNumber < MAX_ATTEMPTS,
   });
-}
-
-async function updateSalesforceFirstTextDate(sfType: string | null, sfId: string | null): Promise<void> {
-  if (!sfType || !sfId || !SF_USERNAME || !SF_PASSWORD || !SF_SEC_TOKEN) {
-    console.log("Skipping SF update — missing credentials or SF fields");
-    return;
-  }
-
-  try {
-    // Login to Salesforce
-    const loginResponse = await fetch("https://login.salesforce.com/services/oauth2/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "password",
-        client_id: Deno.env.get("SALESFORCE_CLIENT_ID") || "",
-        client_secret: Deno.env.get("SALESFORCE_CLIENT_SECRET") || "",
-        username: SF_USERNAME,
-        password: SF_PASSWORD + SF_SEC_TOKEN,
-      }),
-    });
-
-    if (!loginResponse.ok) {
-      console.error("SF login failed:", await loginResponse.text());
-      return;
-    }
-
-    const loginData = await loginResponse.json();
-    const instanceUrl = loginData.instance_url;
-    const accessToken = loginData.access_token;
-
-    const objectType = sfType.trim().toLowerCase() === "contact" ? "Contact" : "Lead";
-
-    // Get current record
-    const recordResponse = await fetch(
-      `${instanceUrl}/services/data/v59.0/sobjects/${objectType}/${sfId}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } },
-    );
-
-    if (!recordResponse.ok) {
-      console.error("SF record fetch failed:", await recordResponse.text());
-      return;
-    }
-
-    const record = await recordResponse.json();
-    const now = new Date().toISOString();
-    const updates: Record<string, string> = {};
-
-    if (record.X1st_Text_Date__c == null) {
-      updates.X1st_Text_Date__c = now;
-    }
-    if (record.Original_1st_Text_Date__c == null) {
-      updates.Original_1st_Text_Date__c = now;
-    }
-
-    if (Object.keys(updates).length > 0) {
-      const patchResponse = await fetch(
-        `${instanceUrl}/services/data/v59.0/sobjects/${objectType}/${sfId}`,
-        {
-          method: "PATCH",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(updates),
-        },
-      );
-
-      if (!patchResponse.ok) {
-        console.error("SF update failed:", await patchResponse.text());
-      } else {
-        console.log(`SF ${objectType} ${sfId} updated:`, Object.keys(updates));
-      }
-    } else {
-      console.log(`SF ${objectType} ${sfId} already has text dates set`);
-    }
-  } catch (err) {
-    console.error("SF update error:", err);
-  }
 }
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {

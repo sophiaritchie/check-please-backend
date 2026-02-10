@@ -8,10 +8,6 @@ const supabase = createClient(
 
 const secret = Deno.env.get("DIALPAD_WEBHOOK_SECRET");
 
-const SF_USERNAME = Deno.env.get("SALESFORCE_USERNAME");
-const SF_PASSWORD = Deno.env.get("SALESFORCE_PASSWORD");
-const SF_SEC_TOKEN = Deno.env.get("SALESFORCE_SEC_TOKEN");
-
 async function verifyJwt(token: string): Promise<Record<string, unknown>> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -100,7 +96,6 @@ async function handlePayload(payload: Record<string, unknown>): Promise<Response
     });
   }
 
-  // 1. Try send_attempts lookup first (new architecture)
   const { data: attempt } = await supabase
     .from("send_attempts")
     .select("id, message_id, attempt_number")
@@ -151,6 +146,7 @@ async function handleSendAttemptUpdate(
 
   if (latestAttempt && latestAttempt.id === attempt.id) {
     // This is the latest attempt — propagate status to messages table
+    // (SF update is handled automatically by DB trigger on status change)
     const messageUpdate: Record<string, string> = {};
     if (messageStatus) messageUpdate.message_status = messageStatus;
     if (deliveryResult) messageUpdate.message_delivery_result = deliveryResult;
@@ -163,19 +159,6 @@ async function handleSendAttemptUpdate(
 
       if (msgErr) {
         console.error("messages update error:", msgErr);
-      }
-    }
-
-    // If terminal success, trigger Salesforce update
-    if (messageStatus === "sent" || messageStatus === "delivered") {
-      const { data: msg } = await supabase
-        .from("messages")
-        .select("sf_type, sf_id")
-        .eq("id", attempt.message_id)
-        .single();
-
-      if (msg?.sf_type && msg?.sf_id) {
-        await updateSalesforceFirstTextDate(msg.sf_type, msg.sf_id);
       }
     }
   } else {
@@ -193,79 +176,4 @@ async function handleSendAttemptUpdate(
     JSON.stringify({ ok: true, attempt_id: attempt.id, message_id: attempt.message_id }),
     { headers: { "Content-Type": "application/json" } },
   );
-}
-
-async function updateSalesforceFirstTextDate(sfType: string, sfId: string): Promise<void> {
-  if (!SF_USERNAME || !SF_PASSWORD || !SF_SEC_TOKEN) {
-    console.log("Skipping SF update — missing credentials");
-    return;
-  }
-
-  try {
-    const loginResponse = await fetch("https://login.salesforce.com/services/oauth2/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "password",
-        client_id: Deno.env.get("SALESFORCE_CLIENT_ID") || "",
-        client_secret: Deno.env.get("SALESFORCE_CLIENT_SECRET") || "",
-        username: SF_USERNAME,
-        password: SF_PASSWORD + SF_SEC_TOKEN,
-      }),
-    });
-
-    if (!loginResponse.ok) {
-      console.error("SF login failed:", await loginResponse.text());
-      return;
-    }
-
-    const loginData = await loginResponse.json();
-    const instanceUrl = loginData.instance_url;
-    const accessToken = loginData.access_token;
-
-    const objectType = sfType.trim().toLowerCase() === "contact" ? "Contact" : "Lead";
-
-    const recordResponse = await fetch(
-      `${instanceUrl}/services/data/v59.0/sobjects/${objectType}/${sfId}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } },
-    );
-
-    if (!recordResponse.ok) {
-      console.error("SF record fetch failed:", await recordResponse.text());
-      return;
-    }
-
-    const record = await recordResponse.json();
-    const now = new Date().toISOString();
-    const updates: Record<string, string> = {};
-
-    if (record.X1st_Text_Date__c == null) {
-      updates.X1st_Text_Date__c = now;
-    }
-    if (record.Original_1st_Text_Date__c == null) {
-      updates.Original_1st_Text_Date__c = now;
-    }
-
-    if (Object.keys(updates).length > 0) {
-      const patchResponse = await fetch(
-        `${instanceUrl}/services/data/v59.0/sobjects/${objectType}/${sfId}`,
-        {
-          method: "PATCH",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(updates),
-        },
-      );
-
-      if (!patchResponse.ok) {
-        console.error("SF update failed:", await patchResponse.text());
-      } else {
-        console.log(`SF ${objectType} ${sfId} updated:`, Object.keys(updates));
-      }
-    }
-  } catch (err) {
-    console.error("SF update error:", err);
-  }
 }

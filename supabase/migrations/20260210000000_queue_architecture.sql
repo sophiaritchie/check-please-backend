@@ -13,17 +13,20 @@ ALTER TABLE messages
   ADD COLUMN last_attempted_at TIMESTAMPTZ,
   ADD COLUMN failed_at TIMESTAMPTZ;
 
--- 2. Drop Dialpad-response columns (now live in send_attempts only)
+-- 2. Relax constraints for queue-time inserts (values not known until send)
+ALTER TABLE messages
+  ALTER COLUMN dialpad_id DROP NOT NULL;
+
+-- Drop the unique constraint on dialpad_id
 ALTER TABLE messages
   DROP CONSTRAINT messages_dialpad_id_key;
 
 ALTER TABLE messages
-  DROP COLUMN dialpad_id,
-  DROP COLUMN contact_id,
-  DROP COLUMN device_type,
-  DROP COLUMN direction,
-  DROP COLUMN target_id,
-  DROP COLUMN target_type;
+  ALTER COLUMN contact_id DROP NOT NULL;
+
+ALTER TABLE messages
+  ALTER COLUMN direction DROP NOT NULL,
+  ALTER COLUMN direction SET DEFAULT 'outbound';
 
 ALTER TABLE messages
   ALTER COLUMN created_date SET DEFAULT NOW();
