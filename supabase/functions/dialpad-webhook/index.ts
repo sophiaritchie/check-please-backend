@@ -8,6 +8,22 @@ const supabase = createClient(
 
 const secret = Deno.env.get("DIALPAD_WEBHOOK_SECRET");
 
+// Higher number = more terminal. Only allow forward movement.
+const STATUS_PRECEDENCE: Record<string, number> = {
+  sending: 0,
+  pending: 1,
+  sent: 2,
+  delivered: 3,
+  failed: 3,
+  undelivered: 3,
+};
+
+function shouldUpdateStatus(currentStatus: string, newStatus: string): boolean {
+  const current = STATUS_PRECEDENCE[currentStatus] ?? -1;
+  const next = STATUS_PRECEDENCE[newStatus] ?? -1;
+  return next > current;
+}
+
 async function verifyJwt(token: string): Promise<Record<string, unknown>> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -98,7 +114,7 @@ async function handlePayload(payload: Record<string, unknown>): Promise<Response
 
   const { data: attempt } = await supabase
     .from("send_attempts")
-    .select("id, message_id, attempt_number")
+    .select("id, message_id, attempt_number, status")
     .eq("dialpad_id", dialpadId)
     .limit(1)
     .maybeSingle();
@@ -115,11 +131,20 @@ async function handlePayload(payload: Record<string, unknown>): Promise<Response
 }
 
 async function handleSendAttemptUpdate(
-  attempt: { id: string; message_id: string; attempt_number: number },
+  attempt: { id: string; message_id: string; attempt_number: number; status: string },
   messageStatus: string | undefined,
   deliveryResult: string | undefined,
 ): Promise<Response> {
   const now = new Date().toISOString();
+
+  // Check precedence — don't go backwards
+  if (messageStatus && !shouldUpdateStatus(attempt.status, messageStatus)) {
+    console.log(`Ignoring status regression: ${attempt.status} → ${messageStatus}`);
+    return new Response(
+      JSON.stringify({ ok: true, skipped: true, reason: "status regression", current: attempt.status, incoming: messageStatus }),
+      { headers: { "Content-Type": "application/json" } },
+    );
+  }
 
   // Update send_attempts row
   const attemptUpdate: Record<string, string> = { updated_at: now };
@@ -147,14 +172,10 @@ async function handleSendAttemptUpdate(
   if (latestAttempt && latestAttempt.id === attempt.id) {
     // This is the latest attempt — propagate status to messages table
     // (SF update is handled automatically by DB trigger on status change)
-    const messageUpdate: Record<string, string> = {};
-    if (messageStatus) messageUpdate.message_status = messageStatus;
-    if (deliveryResult) messageUpdate.message_delivery_result = deliveryResult;
-
-    if (Object.keys(messageUpdate).length > 0) {
+    if (messageStatus) {
       const { error: msgErr } = await supabase
         .from("messages")
-        .update(messageUpdate)
+        .update({ message_status: messageStatus })
         .eq("id", attempt.message_id);
 
       if (msgErr) {
