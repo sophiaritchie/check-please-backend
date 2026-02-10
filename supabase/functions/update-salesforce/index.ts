@@ -115,9 +115,9 @@ async function updateSalesforceFirstTextDate(sfType: string, sfId: string): Prom
 
     if (record.X1st_Text_Date__c == null) {
       updates.X1st_Text_Date__c = now;
-    }
-    if (record.Original_1st_Text_Date__c == null) {
-      updates.Original_1st_Text_Date__c = now;
+      if (record.Original_1st_Text_Date__c == null) {
+        updates.Original_1st_Text_Date__c = now;
+      }
     }
 
     if (Object.keys(updates).length > 0) {
