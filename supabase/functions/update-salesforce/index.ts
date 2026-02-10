@@ -40,39 +40,68 @@ Deno.serve(async (req) => {
   return jsonResponse({ ok: true, sf_id: msg.sf_id, sf_type: msg.sf_type });
 });
 
-async function updateSalesforceFirstTextDate(sfType: string, sfId: string): Promise<void> {
+async function sfSoapLogin(): Promise<{ instanceUrl: string; sessionId: string } | null> {
   if (!SF_USERNAME || !SF_PASSWORD || !SF_SEC_TOKEN) {
     console.log("Skipping SF update — missing credentials");
-    return;
+    return null;
   }
 
+  // SOAP login — same mechanism as simple_salesforce
+  const soapBody = `<?xml version="1.0" encoding="utf-8" ?>
+<env:Envelope xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:env="http://schemas.xmlsoap.org/soap/envelope/">
+  <env:Body>
+    <n1:login xmlns:n1="urn:partner.soap.sforce.com">
+      <n1:username>${SF_USERNAME}</n1:username>
+      <n1:password>${SF_PASSWORD}${SF_SEC_TOKEN}</n1:password>
+    </n1:login>
+  </env:Body>
+</env:Envelope>`;
+
+  const loginResponse = await fetch("https://login.salesforce.com/services/Soap/u/59.0", {
+    method: "POST",
+    headers: {
+      "Content-Type": "text/xml",
+      "SOAPAction": "login",
+    },
+    body: soapBody,
+  });
+
+  if (!loginResponse.ok) {
+    console.error("SF SOAP login failed:", await loginResponse.text());
+    return null;
+  }
+
+  const xml = await loginResponse.text();
+
+  const sessionIdMatch = xml.match(/<sessionId>(.+?)<\/sessionId>/);
+  const serverUrlMatch = xml.match(/<serverUrl>(.+?)<\/serverUrl>/);
+
+  if (!sessionIdMatch || !serverUrlMatch) {
+    console.error("SF SOAP login: could not parse response");
+    return null;
+  }
+
+  // Extract instance URL from server URL (e.g. https://ap5.salesforce.com/...)
+  const serverUrl = serverUrlMatch[1];
+  const instanceUrl = serverUrl.match(/^(https:\/\/[^/]+)/)?.[1] || "";
+
+  return { instanceUrl, sessionId: sessionIdMatch[1] };
+}
+
+async function updateSalesforceFirstTextDate(sfType: string, sfId: string): Promise<void> {
   try {
-    const loginResponse = await fetch("https://login.salesforce.com/services/oauth2/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "password",
-        client_id: Deno.env.get("SALESFORCE_CLIENT_ID") || "",
-        client_secret: Deno.env.get("SALESFORCE_CLIENT_SECRET") || "",
-        username: SF_USERNAME,
-        password: SF_PASSWORD + SF_SEC_TOKEN,
-      }),
-    });
+    const auth = await sfSoapLogin();
+    if (!auth) return;
 
-    if (!loginResponse.ok) {
-      console.error("SF login failed:", await loginResponse.text());
-      return;
-    }
-
-    const loginData = await loginResponse.json();
-    const instanceUrl = loginData.instance_url;
-    const accessToken = loginData.access_token;
-
+    const { instanceUrl, sessionId } = auth;
     const objectType = sfType.trim().toLowerCase() === "contact" ? "Contact" : "Lead";
 
+    // Get current record
     const recordResponse = await fetch(
       `${instanceUrl}/services/data/v59.0/sobjects/${objectType}/${sfId}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } },
+      { headers: { Authorization: `Bearer ${sessionId}` } },
     );
 
     if (!recordResponse.ok) {
@@ -97,7 +126,7 @@ async function updateSalesforceFirstTextDate(sfType: string, sfId: string): Prom
         {
           method: "PATCH",
           headers: {
-            Authorization: `Bearer ${accessToken}`,
+            Authorization: `Bearer ${sessionId}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify(updates),
