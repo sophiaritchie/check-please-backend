@@ -9,7 +9,7 @@ const DIALPAD_API_URL = Deno.env.get("DIALPAD_API_URL")!;
 const DIALPAD_API_KEY = Deno.env.get("DIALPAD_API_KEY")!;
 const DIALPAD_FROM_NUMBER = Deno.env.get("DIALPAD_FROM_NUMBER")!;
 
-const MAX_ATTEMPTS = 3;
+const MAX_ATTEMPTS = 7;
 
 interface Message {
   id: string;
