@@ -40,6 +40,8 @@ Deno.serve(async (_req) => {
 });
 
 async function findNextMessage(): Promise<Message | null> {
+  const now = new Date().toISOString();
+
   // Priority a) Stuck pending messages (no webhook update in 10 min)
   const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
@@ -49,6 +51,7 @@ async function findNextMessage(): Promise<Message | null> {
     .eq("message_status", "pending")
     .lt("last_attempted_at", tenMinAgo)
     .lt("attempt_count", MAX_ATTEMPTS)
+    .or(`send_after.is.null,send_after.lte.${now}`)
     .order("priority", { ascending: false })
     .order("queued_at", { ascending: true })
     .limit(1);
@@ -64,6 +67,7 @@ async function findNextMessage(): Promise<Message | null> {
     .select("id, from_number, to_numbers, text, attempt_count, message_status")
     .in("message_status", ["failed", "undelivered"])
     .lt("attempt_count", MAX_ATTEMPTS)
+    .or(`send_after.is.null,send_after.lte.${now}`)
     .order("priority", { ascending: false })
     .order("queued_at", { ascending: true })
     .limit(1);
@@ -78,6 +82,7 @@ async function findNextMessage(): Promise<Message | null> {
     .from("messages")
     .select("id, from_number, to_numbers, text, attempt_count, message_status")
     .eq("message_status", "queued")
+    .or(`send_after.is.null,send_after.lte.${now}`)
     .order("priority", { ascending: false })
     .order("queued_at", { ascending: true })
     .limit(1);

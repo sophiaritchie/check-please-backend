@@ -23,6 +23,7 @@ def determine_priority(sf_type, text):
     return 1
 
 
+
 def normalize_phone(phone_number):
     """Strip non-digits, remove leading 0 / +61 / 61 prefix, add country code."""
     phone_number = re.sub("[^0-9]", "", phone_number)
@@ -87,7 +88,17 @@ def main():
                     sf_type = ""
                     continue
 
+                if "market taster" not in text_string.lower():
+                    # Temp change: only add market tasters right now
+                    text_string = ""
+                    phone_number = ""
+                    sf_id = ""
+                    sf_type = ""
+                    continue
+
                 priority = determine_priority(sf_type, text_string)
+                # 12pm Melbourne time on 12/03/2026 is 01:00 UTC (AEDT is UTC+11)
+                send_after = "2026-03-12T01:00:00Z"
 
                 messages_to_insert.append(
                     {
@@ -98,6 +109,7 @@ def main():
                         "sf_id": sf_id.strip(),
                         "sf_type": sf_type.strip(),
                         "priority": priority,
+                        "send_after": send_after,
                     }
                 )
 
