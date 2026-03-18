@@ -3,6 +3,8 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from supabase import create_client
 from dotenv import load_dotenv
 
@@ -12,6 +14,39 @@ supabase = create_client(
     os.getenv("SUPABASE_URL", ""),
     os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
 )
+
+
+DATE_PATTERN = r'\b(\d{1,2}-[A-Za-z]{3}-\d{2})\b'
+MELB_TZ = ZoneInfo("Australia/Melbourne")
+
+
+def advance_date_in_text(text):
+    """Find a date like '11-Mar-26' in the text and replace it with the next day."""
+    match = re.search(DATE_PATTERN, text)
+    if not match:
+        return text
+    original = match.group(1)
+    try:
+        dt = datetime.strptime(original, "%d-%b-%y")
+        nd = dt + timedelta(days=1)
+        next_day_str = f"{nd.day}-{nd.strftime('%b-%y')}"
+        return text.replace(original, next_day_str, 1)
+    except ValueError:
+        return text
+
+
+def mt_send_after(text):
+    """Return send_after UTC ISO string: next day after the date in the text, 12pm Melbourne time."""
+    match = re.search(DATE_PATTERN, text)
+    if not match:
+        return None
+    try:
+        dt = datetime.strptime(match.group(1), "%d-%b-%y")
+        nd = dt + timedelta(days=1)
+        melb_noon = datetime(nd.year, nd.month, nd.day, 12, 0, 0, tzinfo=MELB_TZ)
+        return melb_noon.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
 
 
 def determine_priority(sf_type, text):
@@ -88,17 +123,14 @@ def main():
                     sf_type = ""
                     continue
 
-                if "market taster" not in text_string.lower():
-                    # Temp change: only add market tasters right now
-                    text_string = ""
-                    phone_number = ""
-                    sf_id = ""
-                    sf_type = ""
-                    continue
+                is_mt = sf_type.strip().lower() == "lead" and "market taster" in text_string.lower()
+                if is_mt:
+                    send_after = mt_send_after(text_string) or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    text_string = advance_date_in_text(text_string)
+                else:
+                    send_after = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
                 priority = determine_priority(sf_type, text_string)
-                # 12pm Melbourne time on 12/03/2026 is 01:00 UTC (AEDT is UTC+11)
-                send_after = "2026-03-12T01:00:00Z"
 
                 messages_to_insert.append(
                     {
