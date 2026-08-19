@@ -10,6 +10,7 @@ const DIALPAD_API_KEY = Deno.env.get("DIALPAD_API_KEY")!;
 const DIALPAD_FROM_NUMBER = Deno.env.get("DIALPAD_FROM_NUMBER")!;
 
 const MAX_ATTEMPTS = 7;
+const MAX_AGE_DAYS = 1;
 
 interface Message {
   id: string;
@@ -42,6 +43,10 @@ Deno.serve(async (_req) => {
 async function findNextMessage(): Promise<Message | null> {
   const now = new Date().toISOString();
 
+  // Never resurrect a stale job: a webhook that lands days later must not trigger a
+  // send. Age runs from queued_at, or send_after when that is later (scheduled sends).
+  const cutoff = new Date(Date.now() - MAX_AGE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
   // Priority a) Stuck pending messages (no webhook update in 10 min)
   const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
 
@@ -52,6 +57,7 @@ async function findNextMessage(): Promise<Message | null> {
     .lt("last_attempted_at", tenMinAgo)
     .lt("attempt_count", MAX_ATTEMPTS)
     .or(`send_after.is.null,send_after.lte.${now}`)
+    .or(`queued_at.gte.${cutoff},send_after.gte.${cutoff}`)
     .order("priority", { ascending: false })
     .order("queued_at", { ascending: true })
     .limit(1);
@@ -68,6 +74,7 @@ async function findNextMessage(): Promise<Message | null> {
     .in("message_status", ["failed", "undelivered"])
     .lt("attempt_count", MAX_ATTEMPTS)
     .or(`send_after.is.null,send_after.lte.${now}`)
+    .or(`queued_at.gte.${cutoff},send_after.gte.${cutoff}`)
     .order("priority", { ascending: false })
     .order("queued_at", { ascending: true })
     .limit(1);
@@ -83,6 +90,7 @@ async function findNextMessage(): Promise<Message | null> {
     .select("id, from_number, to_numbers, text, attempt_count, message_status")
     .eq("message_status", "queued")
     .or(`send_after.is.null,send_after.lte.${now}`)
+    .or(`queued_at.gte.${cutoff},send_after.gte.${cutoff}`)
     .order("priority", { ascending: false })
     .order("queued_at", { ascending: true })
     .limit(1);
