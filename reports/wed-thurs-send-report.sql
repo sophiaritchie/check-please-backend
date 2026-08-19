@@ -62,13 +62,18 @@ failed_list as (
         '• *' || coalesce(trim(substring(m.text from 'For ([^\r\n]+)')), 'Unknown') || '* ('
           || array_to_string(m.to_numbers, ', ') || ', '
           || case m.priority when 2 then 'Contact' when 1 then 'Lead' else 'Lead (taster)' end || '): '
-          || upper(m.message_status) || ' – '
-          || coalesce(sa.delivery_result, sa.error_detail, '(no reason reported)')
+          || case m.message_status
+               when 'failed' then 'FAILED – ' || coalesce(sa.delivery_result, sa.error_detail, '(no reason reported)')
+               when 'undelivered' then 'UNDELIVERED – ' || coalesce(sa.delivery_result, sa.error_detail, '(no reason reported)')
+               when 'pending' then 'PENDING – Dialpad has not yet confirmed sent'
+               when 'sending' then 'SENDING – In progress to Dialpad'
+               else upper(m.message_status)
+             end
           || ' (attempt ' || m.attempt_count || ')',
         E'\n'
         order by m.priority desc, m.text
       ),
-      '✓ No failed or undelivered messages'
+      '✓ No failed, undelivered, or pending messages'
     ) as failure_text
   from messages m
   left join lateral (
@@ -81,7 +86,7 @@ failed_list as (
   params p
   where (coalesce(m.send_after, m.queued_at) at time zone 'Australia/Melbourne')::date
         between p.start_date and p.end_date
-    and m.message_status in ('failed', 'undelivered')
+    and m.message_status in ('failed', 'undelivered', 'pending', 'sending')
 )
 select
   '*Weekly Text Send Report (Wed & Thu) – '
@@ -103,7 +108,7 @@ select
           then ' (' || round(100.0 * delivered / total, 1) || '%)'
           else '' end
   || case when coalesce(sent, 0) > 0 then ' | Sent (awaiting carrier DLR): ' || sent else '' end
-  || E'\n\n*Failed / Undelivered:* \n'
+  || E'\n\n*Failed, Undelivered & In-Flight:* \n'
   || (select failure_text from failed_list)
   as chat_report
 from agg;
