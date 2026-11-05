@@ -170,7 +170,8 @@ async function updateSheetFirstTextDate(sfType: string, sfId: string): Promise<v
       return;
     }
 
-    const now = new Date().toISOString();
+    // Date only, in Melbourne time, matching the sheet's yyyy-mm-dd date columns.
+    const now = new Date().toLocaleDateString("en-CA", { timeZone: "Australia/Melbourne" });
     const sheetRow = rowIndex + 1; // 1-based sheet row number
 
     // Only set Original_1st_Text_Date__c if it too is empty (matches old guard).
@@ -187,7 +188,8 @@ async function updateSheetFirstTextDate(sfType: string, sfId: string): Promise<v
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ valueInputOption: "RAW", data }),
+      // USER_ENTERED so the string is parsed into a real date, like the existing values.
+      body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),
     });
 
     if (!patchResp.ok) {
