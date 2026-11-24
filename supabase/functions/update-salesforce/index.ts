@@ -147,6 +147,7 @@ async function updateSheetFirstTextDate(sfType: string, sfId: string): Promise<v
     const idCol = header.indexOf("Id");
     const x1stCol = header.indexOf("X1st_Text_Date__c");
     const origCol = header.indexOf("Original_1st_Text_Date__c");
+    const subResultCol = header.indexOf("Subscribe_Result__c");
     if (idCol === -1 || x1stCol === -1) {
       console.error("Required columns (Id / X1st_Text_Date__c) not found in header");
       return;
@@ -165,40 +166,125 @@ async function updateSheetFirstTextDate(sfType: string, sfId: string): Promise<v
     }
 
     const row = values[rowIndex];
-    if (row[x1stCol]) {
-      console.log(`${tab} ${sfId} already has a first text date`);
-      return;
-    }
-
-    // Date only, in Melbourne time, matching the sheet's yyyy-mm-dd date columns.
-    const now = new Date().toLocaleDateString("en-CA", { timeZone: "Australia/Melbourne" });
     const sheetRow = rowIndex + 1; // 1-based sheet row number
 
-    // Only set Original_1st_Text_Date__c if it too is empty (matches old guard).
-    const data: { range: string; values: string[][] }[] = [
-      { range: `${tab}!${colLetter(x1stCol)}${sheetRow}`, values: [[now]] },
-    ];
-    if (origCol !== -1 && !row[origCol]) {
-      data.push({ range: `${tab}!${colLetter(origCol)}${sheetRow}`, values: [[now]] });
+    // Stamp the first-text date on the first delivery only. On later deliveries this
+    // is a no-op, but we must NOT early-return here: the Market Taster check below
+    // has to re-run on deliveries #2..#5+ to promote the lead on their 5th text.
+    if (!row[x1stCol]) {
+      // Date only, in Melbourne time, matching the sheet's yyyy-mm-dd date columns.
+      const now = new Date().toLocaleDateString("en-CA", { timeZone: "Australia/Melbourne" });
+
+      // Only set Original_1st_Text_Date__c if it too is empty (matches old guard).
+      const data: { range: string; values: string[][] }[] = [
+        { range: `${tab}!${colLetter(x1stCol)}${sheetRow}`, values: [[now]] },
+      ];
+      if (origCol !== -1 && !row[origCol]) {
+        data.push({ range: `${tab}!${colLetter(origCol)}${sheetRow}`, values: [[now]] });
+      }
+
+      const patchResp = await fetch(`${base}/values:batchUpdate`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        // USER_ENTERED so the string is parsed into a real date, like the existing values.
+        body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),
+      });
+
+      if (!patchResp.ok) {
+        console.error("Sheet update failed:", await patchResp.text());
+      } else {
+        console.log(`${tab} ${sfId} first text date written to sheet`);
+      }
+    } else {
+      console.log(`${tab} ${sfId} already has a first text date`);
     }
 
-    const patchResp = await fetch(`${base}/values:batchUpdate`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      // USER_ENTERED so the string is parsed into a real date, like the existing values.
-      body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),
-    });
-
-    if (!patchResp.ok) {
-      console.error("Sheet update failed:", await patchResp.text());
-    } else {
-      console.log(`${tab} ${sfId} first text date written to sheet`);
+    // Leads only: promote Trial -> Market Taster once the lead has received their
+    // 5th weekly text. Contacts use Subscription_Type__c and are never touched here.
+    if (tab === "Leads") {
+      await maybePromoteToMarketTaster(base, token, tab, sheetRow, subResultCol, row, sfId);
     }
   } catch (err) {
     console.error("Sheet update error:", err);
+  }
+}
+
+// --- Trial -> Market Taster promotion -------------------------------------
+//
+// A new lead gets a free trial of 4 weekly texts while Subscribe_Result__c = "Trial".
+// From the 5th weekly text onward they become "Market Taster" (the free ongoing taster
+// tier). The boundary is strict: the 4th text must NOT flip; the 5th must.
+//
+// Counting signal: this function is invoked by the Postgres trigger once per message
+// that reaches `delivered`, and every weekly text to a lead is a `messages` row carrying
+// that lead's sf_id — the same event that stamps X1st_Text_Date__c on delivery #1. So the
+// number of delivered `messages` rows for this sf_id IS the number of weekly texts the lead
+// has received. We flip when that count reaches 5. This exact per-lead count is preferred
+// over counting Wednesdays from X1st_Text_Date__c, which overcounts if a weekly send was
+// ever skipped and would then flip a lead early.
+async function maybePromoteToMarketTaster(
+  base: string,
+  token: string,
+  tab: string,
+  sheetRow: number,
+  subResultCol: number,
+  row: string[],
+  sfId: string,
+): Promise<void> {
+  if (subResultCol === -1) {
+    console.log("Subscribe_Result__c column not found — skipping Market Taster check");
+    return;
+  }
+
+  // Idempotent + safe: only ever promote a row whose current status is exactly "Trial"
+  // (case/space-insensitive). Never touch "Opted Out", "Paused", blank, or already
+  // "Market Taster".
+  const current = (row[subResultCol] ?? "").trim().toLowerCase();
+  if (current !== "trial") {
+    return;
+  }
+
+  // Count weekly texts delivered to this lead (one delivered message per weekly text).
+  const { count, error } = await supabase
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("sf_id", sfId)
+    .eq("message_status", "delivered");
+
+  if (error) {
+    // Safe default: never promote on uncertain data.
+    console.error(`Failed to count delivered texts for ${sfId}:`, error);
+    return;
+  }
+
+  const textsReceived = count ?? 0;
+  // First 4 weekly texts stay "Trial"; promote from the 5th onward.
+  if (textsReceived < 5) {
+    console.log(`Lead ${sfId} has received ${textsReceived} text(s) — staying Trial`);
+    return;
+  }
+
+  const patchResp = await fetch(`${base}/values:batchUpdate`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      valueInputOption: "USER_ENTERED",
+      data: [
+        { range: `${tab}!${colLetter(subResultCol)}${sheetRow}`, values: [["Market Taster"]] },
+      ],
+    }),
+  });
+
+  if (!patchResp.ok) {
+    console.error("Market Taster update failed:", await patchResp.text());
+  } else {
+    console.log(`Lead ${sfId} promoted to Market Taster on text #${textsReceived}`);
   }
 }
 
